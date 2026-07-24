@@ -104,16 +104,24 @@
   .note{font-size:12px; color:var(--sub); text-align:center; margin-top:10px;}
   .badge{display:inline-block; font-size:11px; padding:2px 8px; border-radius:20px; background:var(--line); color:var(--sub); margin-left:6px; vertical-align:middle;}
   a.link{color:var(--accent-ink); cursor:pointer; text-decoration:underline; font-size:13px;}
+
+  /* sync status */
+  .syncbar{display:flex; align-items:center; justify-content:center; gap:6px; font-size:11px; color:var(--sub); margin:-4px 0 10px;}
+  .syncdot{width:7px; height:7px; border-radius:50%; background:var(--sub);}
+  .syncdot.on{background:var(--green);} .syncdot.off{background:var(--line);} .syncdot.err{background:var(--red);}
+  .code-box{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:17px; letter-spacing:.04em; text-align:center; background:var(--bg); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px; word-break:break-all; user-select:all;}
 </style>
 </head>
 <body>
 <div class="app" id="app"></div>
 
+<script src="config.js"></script>
 <script>
 "use strict";
 
 /* ---------- storage ---------- */
 const KEY = "kazokuChoshi_v1";
+const CODE_KEY = "kazokuChoshi_familyCode";
 const EMOJIS = ["👨","👩","👧","👦","👴","👵","🧑","👶","🐱","🐶"];
 function load(){
   try{ return JSON.parse(localStorage.getItem(KEY)) || {profiles:[], records:{}}; }
@@ -121,6 +129,82 @@ function load(){
 }
 function save(){ localStorage.setItem(KEY, JSON.stringify(db)); }
 let db = load();
+
+/* ---------- family code + sync bridge ----------
+   The Firebase module (bottom of this file) registers itself as
+   window.__syncImpl. Everything here degrades gracefully to
+   "this device only" when that never happens. */
+let familyCode = localStorage.getItem(CODE_KEY) || "";
+let syncStatus = "off"; // off | connecting | on | err
+
+const CODE_ALPHA = "abcdefghjkmnpqrstuvwxyz23456789"; // no i,l,o,0,1
+function makeFamilyCode(){
+  const grp = n => Array.from({length:n},()=>CODE_ALPHA[Math.floor(Math.random()*CODE_ALPHA.length)]).join("");
+  return `kzk-${grp(4)}-${grp(4)}-${grp(4)}`; // 18 chars, unguessable
+}
+function syncConfigured(){
+  const c = window.FIREBASE_CONFIG;
+  return !!(c && c.databaseURL);
+}
+const Sync = {
+  get on(){ return !!(familyCode && window.__syncImpl); },
+  pushProfile(p){ if(this.on) window.__syncImpl.pushProfile(p); },
+  pushRecord(pid, rec){ if(this.on) window.__syncImpl.pushRecord(pid, rec); },
+  removeProfile(id){ if(this.on) window.__syncImpl.removeProfile(id); },
+  replaceAll(){ if(this.on) window.__syncImpl.replaceAll(db); },
+};
+
+// called by the Firebase module when remote data arrives
+function applyRemote(remote){
+  const profiles = Object.entries(remote.profiles||{})
+    .map(([id,p])=>({id, ...p}))
+    .sort((a,b)=>(a.order||0)-(b.order||0));
+  const records = {};
+  for(const [pid, byDate] of Object.entries(remote.records||{})){
+    records[pid] = Object.entries(byDate)
+      .map(([date,rec])=>({date, ...rec}))
+      .sort((a,b)=>a.date<b.date?-1:1);
+  }
+  db = {profiles, records};
+  save();
+  // never yank the screen out from under someone mid-measurement
+  if(state.view!=="measure") render();
+}
+function setSyncStatus(s){ syncStatus=s; const el=document.getElementById("syncbar"); if(el) el.outerHTML=syncBarHTML(); }
+function syncBarHTML(){
+  let dot="off", txt;
+  if(!syncConfigured()) txt="この端末のみに保存中（共有は未設定）";
+  else if(!familyCode) txt="この端末のみ・家族グループ未参加";
+  else if(syncStatus==="on"){ dot="on"; txt="家族グループと同期中"; }
+  else if(syncStatus==="err"){ dot="err"; txt="オフライン（この端末に保存）"; }
+  else txt="接続しています…";   // connecting、または接続待ち
+  return `<div class="syncbar" id="syncbar"><span class="syncdot ${dot}"></span>${txt}</div>`;
+}
+
+function createFamilyGroup(){
+  familyCode = makeFamilyCode();
+  localStorage.setItem(CODE_KEY, familyCode);
+  closeModal();
+  if(window.__syncImpl){ window.__syncImpl.join(familyCode, true); } // true = seed remote from local
+  render();
+  setTimeout(()=>openFamilyCode(true), 300);
+}
+function joinFamilyGroup(){
+  const v = (document.getElementById("joinCode").value||"").trim().toLowerCase();
+  if(v.length<16){ alert("合言葉が短すぎるようです。kzk- から始まる全体をそのまま貼り付けてください。"); return; }
+  if(!confirm("この端末の今の記録は、家族グループの内容に置きかわります。よろしいですか？")) return;
+  familyCode = v;
+  localStorage.setItem(CODE_KEY, familyCode);
+  closeModal();
+  if(window.__syncImpl){ window.__syncImpl.join(familyCode, false); }
+  render();
+}
+function leaveFamilyGroup(){
+  if(!confirm("家族グループから抜けます。（グループのデータは消えません）")) return;
+  familyCode=""; localStorage.removeItem(CODE_KEY);
+  if(window.__syncImpl) window.__syncImpl.leave();
+  syncStatus="off"; closeModal(); render();
+}
 
 function todayStr(){ const d=new Date(); return d.toISOString().slice(0,10); }
 function fmtDate(s){ const d=new Date(s+"T00:00"); return (d.getMonth()+1)+"/"+d.getDate(); }
@@ -278,7 +362,7 @@ function renderHome(){
       </div>`;
     }).join("");
   }
-  app.innerHTML = headerBar("家族の調子") + `
+  app.innerHTML = headerBar("家族の調子") + syncBarHTML() + `
     <div class="sectlabel">みんなの様子</div>
     ${cards}
     <button class="btn" style="margin-top:6px" onclick="go('pickMeasure')">＋ 今日の測定をする</button>
@@ -434,7 +518,7 @@ function finishMeasure(){
   db.records[M.pid] = db.records[M.pid].filter(r=>r.date!==rec.date);
   db.records[M.pid].push(rec);
   db.records[M.pid].sort((a,b)=>a.date<b.date?-1:1);
-  save();
+  save(); Sync.pushRecord(M.pid, rec);
   M.step=2; renderMeasure();
 }
 
@@ -588,35 +672,83 @@ function saveProfile(){
   const name=(document.getElementById("pfName").value||"").trim();
   if(!name){ document.getElementById("pfName").focus(); return; }
   const colors=["#f5a623","#4caf72","#e2604a","#5b8def","#a06cd5","#e6a817"];
+  let target;
   if(pickState._editId){
-    const p=db.profiles.find(x=>x.id===pickState._editId);
-    p.name=name; p.emoji=pickState.emoji;
+    target=db.profiles.find(x=>x.id===pickState._editId);
+    target.name=name; target.emoji=pickState.emoji;
   }else{
-    db.profiles.push({id:uid(), name, emoji:pickState.emoji, color:colors[db.profiles.length%colors.length]});
+    target={id:uid(), name, emoji:pickState.emoji, color:colors[db.profiles.length%colors.length], order:Date.now()};
+    db.profiles.push(target);
   }
-  save(); pickState={emoji:EMOJIS[0]}; closeModal(); render();
+  save(); Sync.pushProfile(target);
+  pickState={emoji:EMOJIS[0]}; closeModal(); render();
 }
 function deleteProfile(id){
   if(!confirm("この家族の記録もすべて削除します。よろしいですか？")) return;
   db.profiles=db.profiles.filter(p=>p.id!==id);
   delete db.records[id];
-  save(); pickState={emoji:EMOJIS[0]}; closeModal(); go('home');
+  save(); Sync.removeProfile(id);
+  pickState={emoji:EMOJIS[0]}; closeModal(); go('home');
 }
 
 /* ---------- settings ---------- */
 function openSettings(){
+  let familySection;
+  if(!syncConfigured()){
+    familySection = `<p class="note" style="margin-bottom:14px">家族との共有はまだ設定されていません。<br>記録はこの端末のブラウザ内だけに保存されます。</p>`;
+  }else if(familyCode){
+    familySection = `
+      <p class="note" style="margin:0 0 8px">家族グループに参加中。この合言葉を家族に伝えると、同じ画面が見られます。</p>
+      <div class="code-box">${escapeHtml(familyCode)}</div>
+      <button class="btn secondary" onclick="copyCode()">合言葉をコピー</button>
+      <button class="btn secondary" style="margin-top:8px" onclick="leaveFamilyGroup()">グループから抜ける</button>`;
+  }else{
+    familySection = `
+      <p class="note" style="margin:0 0 10px">家族グループを作ると、家族全員の調子が1つの画面で見られます。</p>
+      <button class="btn" onclick="createFamilyGroup()">家族グループを作る</button>
+      <button class="btn secondary" style="margin-top:8px" onclick="openJoinGroup()">合言葉で参加する</button>`;
+  }
   openModal(`
     <div class="big-instr" style="text-align:center">設定</div>
-    <p class="note" style="margin-bottom:14px">記録はこの端末のブラウザ内だけに保存されます。（家族での共有は次の段階で追加できます）</p>
+    <div class="sectlabel" style="margin-top:4px">家族での共有</div>
+    ${familySection}
+    <div class="sectlabel">データ</div>
     <button class="btn secondary" onclick="seedDemo()">デモデータを入れて動きを見る</button>
     <button class="btn secondary" style="margin-top:8px" onclick="exportData()">データを書き出す(バックアップ)</button>
     <button class="btn secondary" style="margin-top:8px;color:var(--red)" onclick="resetAll()">すべて消去</button>
     <button class="btn ghost" style="margin-top:8px" onclick="closeModal()">閉じる</button>
   `);
 }
+function openJoinGroup(){
+  openModal(`
+    <div class="big-instr" style="text-align:center">合言葉で参加する</div>
+    <p class="note" style="margin:0 0 12px">家族から教えてもらった合言葉を貼り付けてください。</p>
+    <input id="joinCode" placeholder="kzk-xxxx-xxxx-xxxx" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button class="btn" onclick="joinFamilyGroup()">参加する</button>
+    <button class="btn ghost" style="margin-top:8px" onclick="openSettings()">戻る</button>
+  `);
+  setTimeout(()=>document.getElementById("joinCode")?.focus(),50);
+}
+function openFamilyCode(isNew){
+  openModal(`
+    <div class="big-instr" style="text-align:center">${isNew?"家族グループを作りました":"家族の合言葉"}</div>
+    <p class="note" style="margin:0 0 10px">この合言葉を家族に伝えてください。<br>各自のスマホで「合言葉で参加する」に貼り付けると、みんなの調子が見られるようになります。</p>
+    <div class="code-box">${escapeHtml(familyCode)}</div>
+    <button class="btn" onclick="copyCode()">合言葉をコピー</button>
+    <button class="btn ghost" style="margin-top:8px" onclick="closeModal()">閉じる</button>
+  `);
+}
+function copyCode(){
+  navigator.clipboard?.writeText(familyCode).then(
+    ()=>alert("合言葉をコピーしました。家族に送ってください。"),
+    ()=>alert("コピーできませんでした。合言葉を長押しして選択してください。")
+  );
+}
 function resetAll(){
-  if(!confirm("すべての家族と記録を消します。よろしいですか？")) return;
-  db={profiles:[],records:{}}; save(); closeModal(); go('home');
+  if(!confirm(Sync.on
+    ? "家族グループ全員の記録を消します。よろしいですか？"
+    : "すべての家族と記録を消します。よろしいですか？")) return;
+  db={profiles:[],records:{}}; save(); Sync.replaceAll(); closeModal(); go('home');
 }
 function exportData(){
   const blob=new Blob([JSON.stringify(db,null,2)],{type:"application/json"});
@@ -630,10 +762,11 @@ function seedDemo(){
     {name:"お母さん",emoji:"👩",trend:"flat"},
     {name:"むすめ",emoji:"👧",trend:"up"},
   ];
+  if(Sync.on && !confirm("デモデータで家族グループの内容を置きかえます。よろしいですか？")) return;
   db={profiles:[],records:{}};
   demo.forEach((d,idx)=>{
     const id=uid();
-    db.profiles.push({id, name:d.name, emoji:d.emoji, color:colors[idx]});
+    db.profiles.push({id, name:d.name, emoji:d.emoji, color:colors[idx], order:Date.now()+idx});
     db.records[id]=[];
     const days=12;
     for(let i=days-1;i>=0;i--){
@@ -652,7 +785,7 @@ function seedDemo(){
       db.records[id].push({date,ts:dt.getTime(),tapCount,tapCV,tapMeanInterval:Math.round(10000/tapCount),rtMedian,rtSD,rtLapses});
     }
   });
-  save(); closeModal(); go('home');
+  save(); Sync.replaceAll(); closeModal(); go('home');
 }
 
 /* ---------- util ---------- */
@@ -660,6 +793,79 @@ function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"
 
 /* ---------- boot ---------- */
 render();
+</script>
+
+<!-- ============================================================
+     Firebase 同期レイヤー
+     config.js が未設定なら、ここは何も読み込まず
+     アプリは「この端末のみ」モードで動き続けます。
+     ============================================================ -->
+<script type="module">
+(async () => {
+  const cfg = window.FIREBASE_CONFIG;
+  if(!cfg || !cfg.databaseURL) return;           // 未設定 → 同期オフのまま
+
+  // グループ未参加でも接続だけは用意しておく
+  // （あとから「グループを作る」を押したとき即座に同期を始めるため）
+  if(familyCode) setSyncStatus("connecting");
+  let rtdb, fb;
+  try{
+    const appMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
+    fb = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js");
+    const app = appMod.initializeApp(cfg);
+    rtdb = fb.getDatabase(app);
+  }catch(e){
+    console.error("Firebase の読み込みに失敗しました", e);
+    setSyncStatus("err");
+    return;
+  }
+
+  let unsub = null;
+  const famPath = code => `families/${code}`;
+
+  function listen(code){
+    if(unsub) unsub();
+    unsub = fb.onValue(fb.ref(rtdb, famPath(code)),
+      snap => { const v = snap.val(); if(v) applyRemote(v); setSyncStatus("on"); },
+      err  => { console.error(err); setSyncStatus("err"); }
+    );
+  }
+
+  // records are written per person / per date, so two phones
+  // measuring at the same time can never overwrite each other
+  function stripDate(rec){ const {date, ...rest} = rec; return rest; }
+
+  window.__syncImpl = {
+    join(code, seedFromLocal){
+      if(seedFromLocal) this.replaceAll(db);
+      listen(code);
+    },
+    leave(){ if(unsub){ unsub(); unsub=null; } },
+    pushProfile(p){
+      const {id, ...rest} = p;
+      fb.set(fb.ref(rtdb, `${famPath(familyCode)}/profiles/${id}`), rest).catch(e=>setSyncStatus("err"));
+    },
+    pushRecord(pid, rec){
+      fb.set(fb.ref(rtdb, `${famPath(familyCode)}/records/${pid}/${rec.date}`), stripDate(rec)).catch(e=>setSyncStatus("err"));
+    },
+    removeProfile(id){
+      fb.remove(fb.ref(rtdb, `${famPath(familyCode)}/profiles/${id}`));
+      fb.remove(fb.ref(rtdb, `${famPath(familyCode)}/records/${id}`));
+    },
+    replaceAll(local){
+      const state = local || db;
+      const profiles={}, records={};
+      for(const p of state.profiles){ const {id,...rest}=p; profiles[id]=rest; }
+      for(const [pid, list] of Object.entries(state.records||{})){
+        records[pid]={}; for(const r of list) records[pid][r.date]=stripDate(r);
+      }
+      fb.set(fb.ref(rtdb, famPath(familyCode)), {profiles, records}).catch(e=>setSyncStatus("err"));
+    },
+  };
+
+  if(familyCode) listen(familyCode);
+  else setSyncStatus("off");
+})();
 </script>
 </body>
 </html>
