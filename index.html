@@ -402,6 +402,7 @@ function renderMeasure(){
   else { app.innerHTML = head+dots+resultHTML(); }
 }
 function cancelMeasure(){ M=null; go('home'); }
+function goToRtStep(){ if(M){ M.step=1; renderMeasure(); } }
 
 /* --- Step 1: tap rhythm --- */
 function tapStepHTML(){
@@ -412,13 +413,15 @@ function tapStepHTML(){
       <div class="tap-count" id="tapCount">タップして<br>スタート</div>
       <div class="tap-timer" id="tapTimer"></div>
     </div>
+    <div id="tapNext"></div>
   </div>`;
 }
 function initTapStep(){
   const area=document.getElementById("tapArea");
   const countEl=document.getElementById("tapCount");
   const timerEl=document.getElementById("tapTimer");
-  let started=false, taps=[], startT=0, endT=0, lastEvt=0;
+  let started=false, taps=[], startT=0, endT=0, lastEvt=0, done=false;
+  let displayTimer=null, finishTimer=null;
   const DUR=10000;
   function onTap(e){
     e.preventDefault();
@@ -429,27 +432,34 @@ function initTapStep(){
       started=true; startT=now; endT=startT+DUR;
       area.classList.remove("pre"); countEl.innerHTML="0";
       taps.push(now);
-      requestAnimationFrame(tick);
+      // setTimeout/setInterval keep running when the page is backgrounded.
+      // requestAnimationFrame does NOT — it would strand the user mid-measure
+      // if the screen dimmed or a notification pulled them away.
+      displayTimer = setInterval(tick, 100);
+      finishTimer  = setTimeout(finish, DUR);
       return;
     }
     if(now<=endT){ taps.push(now); countEl.innerHTML=taps.length; }
   }
   function tick(){
-    const now=performance.now();
-    const left=Math.max(0,(endT-now)/1000);
+    const left=Math.max(0,(endT-performance.now())/1000);
     timerEl.textContent="残り "+left.toFixed(1)+"秒";
-    if(now<endT){ requestAnimationFrame(tick); }
-    else{ finish(); }
   }
   function finish(){
+    if(done) return; done=true;
+    clearInterval(displayTimer); clearTimeout(finishTimer);
     area.style.pointerEvents="none";
     const intervals=[]; for(let i=1;i<taps.length;i++) intervals.push(taps[i]-taps[i-1]);
     const count=taps.length;
     const meanInt = intervals.length? mean(intervals):0;
     const cv = intervals.length>1 ? std(intervals)/meanInt : 0;
     M.tap={ tapCount:count, tapCV:+(cv).toFixed(4), tapMeanInterval:Math.round(meanInt) };
-    timerEl.innerHTML=`<button class="btn" style="margin-top:14px" onclick="M.step=1;renderMeasure();">次へ（反応テスト）→</button>`;
+    timerEl.textContent = "計測できました";
     countEl.innerHTML = count+"<div style='font-size:16px;font-weight:600'>タップ</div>";
+    // the button must live OUTSIDE #tapArea — that element has
+    // pointer-events:none once counting stops, which would swallow the click
+    document.getElementById("tapNext").innerHTML =
+      `<button class="btn" onclick="goToRtStep()">次へ（反応テスト）→</button>`;
   }
   area.addEventListener("pointerdown", onTap);
 }
@@ -461,6 +471,7 @@ function rtStepHTML(){
     <div class="sub-instr">赤の間は待つ。フライングはやり直しです。全5回。</div>
     <div class="rt-trials" id="rtTrials">${[0,1,2,3,4].map(()=>'<div class="t"></div>').join("")}</div>
     <div class="rt-area rt-ready" id="rtArea">タップして スタート</div>
+    <div id="rtNext"></div>
   </div>`;
 }
 function initRtStep(){
@@ -505,7 +516,10 @@ function initRtStep(){
     const lapses = valid.filter(r=>r>500).length + results.filter(r=>r.bad).length;
     M.rt={ rtMedian:median, rtSD:sd, rtLapses:lapses };
     area.className="rt-area rt-result";
-    area.innerHTML=`中央値 ${median}ms<br><button class="btn" style="margin-top:14px" onclick="finishMeasure()">結果を見る →</button>`;
+    area.innerHTML=`中央値 ${median}ms`;
+    // same reason as the tap step: keep the button out of the tap target
+    document.getElementById("rtNext").innerHTML =
+      `<button class="btn" onclick="finishMeasure()">結果を見る →</button>`;
   }
   area.addEventListener("pointerdown", onTap);
 }
