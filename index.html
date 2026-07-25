@@ -56,6 +56,12 @@
   .empty{text-align:center; color:var(--sub); padding:30px 10px;}
   .sectlabel{font-size:12px; color:var(--sub); text-transform:none; margin:18px 4px 8px; font-weight:700; letter-spacing:.04em;}
 
+  /* last-measured chip */
+  .lastchip{display:inline-block; font-size:10px; font-weight:700; padding:1px 7px; border-radius:20px; background:var(--line); color:var(--sub); white-space:nowrap; margin-right:5px;}
+  .lastchip.today{background:var(--green); color:#fff;}
+  .lastchip.stale{background:var(--accent); color:var(--accent-ink);}
+  .lastchip.none{background:transparent; border:1px solid var(--line); color:var(--sub);}
+
   /* measure */
   .measure-wrap{text-align:center;}
   .step-dots{display:flex; gap:6px; justify-content:center; margin:6px 0 18px;}
@@ -347,14 +353,16 @@ function renderHome(){
   }else{
     cards = db.profiles.map(p=>{
       const st = statusFor(p.id);
+      const last = lastDoneLabel(p.id);
       let sigDot = st.state==="ok" ? `<div class="signal ${st.sig}"></div>` : `<div class="signal none"></div>`;
       let trend = st.state==="none" ? "" : `<div class="trend">${st.arrow||"→"}</div>`;
       let spark = st.spark && st.spark.length>1 ? sparkSVG(st.spark) : `<div style="width:64px"></div>`;
+      let chip = `<span class="lastchip ${last.cls}">${last.text}</span>`;
       return `<div class="card member" onclick="go('detail',{pid:'${p.id}'})">
         <div class="avatar" style="background:${p.color}22">${p.emoji}</div>
         <div class="info">
           <div class="name">${escapeHtml(p.name)}</div>
-          <div class="msg">${st.msg}</div>
+          <div class="msg">${chip}${st.msg}</div>
         </div>
         ${spark}
         ${trend}
@@ -369,6 +377,21 @@ function renderHome(){
     <button class="btn secondary" style="margin-top:10px" onclick="openAddProfile()">家族を追加する</button>
     <p class="note">これは体調の目安を見るためのアプリです。医療的な診断ではありません。</p>
   `;
+}
+// 最後に測定した日を「今日 / 昨日 / N日前 / 日付」で返す
+function lastDoneLabel(pid){
+  const recs = db.records[pid]||[];
+  if(recs.length===0) return {text:"未測定", cls:"none"};
+  const lastDate = recs.map(r=>r.date).sort().pop();
+  const days = daysAgo(lastDate);
+  if(days<=0) return {text:"今日", cls:"today"};
+  if(days===1) return {text:"昨日", cls:""};
+  if(days<7)   return {text:days+"日前", cls:""};
+  return {text:fmtDate(lastDate), cls:"stale"};   // 1週間以上は日付＋強調
+}
+function daysAgo(dateStr){
+  const a=new Date(dateStr+"T00:00"), b=new Date(todayStr()+"T00:00");
+  return Math.round((b-a)/86400000);
 }
 
 /* ---------- pick who measures ---------- */
