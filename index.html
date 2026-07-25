@@ -156,6 +156,7 @@ const Sync = {
   get on(){ return !!(familyCode && window.__syncImpl); },
   pushProfile(p){ if(this.on) window.__syncImpl.pushProfile(p); },
   pushRecord(pid, rec){ if(this.on) window.__syncImpl.pushRecord(pid, rec); },
+  pushGroupName(name){ if(this.on) window.__syncImpl.pushGroupName(name); },
   removeProfile(id){ if(this.on) window.__syncImpl.removeProfile(id); },
   replaceAll(){ if(this.on) window.__syncImpl.replaceAll(db); },
 };
@@ -171,7 +172,7 @@ function applyRemote(remote){
       .map(([date,rec])=>({date, ...rec}))
       .sort((a,b)=>a.date<b.date?-1:1);
   }
-  db = {profiles, records};
+  db = {profiles, records, groupName: remote.groupName||""};
   save();
   // never yank the screen out from under someone mid-measurement
   if(state.view!=="measure") render();
@@ -370,7 +371,8 @@ function renderHome(){
       </div>`;
     }).join("");
   }
-  app.innerHTML = headerBar("家族の調子") + syncBarHTML() + `
+  document.title = groupTitle();
+  app.innerHTML = headerBar(groupTitle()) + syncBarHTML() + `
     <div class="sectlabel">みんなの様子</div>
     ${cards}
     <button class="btn" style="margin-top:6px" onclick="go('pickMeasure')">＋ 今日の測定をする</button>
@@ -393,6 +395,8 @@ function daysAgo(dateStr){
   const a=new Date(dateStr+"T00:00"), b=new Date(todayStr()+"T00:00");
   return Math.round((b-a)/86400000);
 }
+// グループ名（未設定なら「家族」）から画面タイトルを作る
+function groupTitle(){ return (db.groupName||"家族")+"の調子"; }
 
 /* ---------- pick who measures ---------- */
 function renderPickMeasure(){
@@ -747,7 +751,11 @@ function openSettings(){
   }
   openModal(`
     <div class="big-instr" style="text-align:center">設定</div>
-    <div class="sectlabel" style="margin-top:4px">家族での共有</div>
+    <div class="sectlabel" style="margin-top:4px">グループ名</div>
+    <input id="groupName" placeholder="家族" value="${escapeHtml(db.groupName||"")}" maxlength="20">
+    <p class="note" style="margin:-4px 0 4px">「<b>${escapeHtml(db.groupName||"家族")}</b>の調子」と表示されます（例：田中家、営業3課）</p>
+    <button class="btn secondary" onclick="saveGroupName()">名前を保存</button>
+    <div class="sectlabel">家族での共有</div>
     ${familySection}
     <div class="sectlabel">データ</div>
     <button class="btn secondary" onclick="seedDemo()">デモデータを入れて動きを見る</button>
@@ -755,6 +763,11 @@ function openSettings(){
     <button class="btn secondary" style="margin-top:8px;color:var(--red)" onclick="resetAll()">すべて消去</button>
     <button class="btn ghost" style="margin-top:8px" onclick="closeModal()">閉じる</button>
   `);
+}
+function saveGroupName(){
+  const v=(document.getElementById("groupName").value||"").trim();
+  db.groupName=v; save(); Sync.pushGroupName(v);
+  closeModal(); render();
 }
 function openJoinGroup(){
   openModal(`
@@ -885,6 +898,9 @@ render();
     pushRecord(pid, rec){
       fb.set(fb.ref(rtdb, `${famPath(familyCode)}/records/${pid}/${rec.date}`), stripDate(rec)).catch(e=>setSyncStatus("err"));
     },
+    pushGroupName(name){
+      fb.set(fb.ref(rtdb, `${famPath(familyCode)}/groupName`), name||"").catch(e=>setSyncStatus("err"));
+    },
     removeProfile(id){
       fb.remove(fb.ref(rtdb, `${famPath(familyCode)}/profiles/${id}`));
       fb.remove(fb.ref(rtdb, `${famPath(familyCode)}/records/${id}`));
@@ -896,7 +912,7 @@ render();
       for(const [pid, list] of Object.entries(state.records||{})){
         records[pid]={}; for(const r of list) records[pid][r.date]=stripDate(r);
       }
-      fb.set(fb.ref(rtdb, famPath(familyCode)), {profiles, records}).catch(e=>setSyncStatus("err"));
+      fb.set(fb.ref(rtdb, famPath(familyCode)), {profiles, records, groupName: state.groupName||""}).catch(e=>setSyncStatus("err"));
     },
   };
 
