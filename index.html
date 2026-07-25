@@ -99,9 +99,9 @@
   .hist-row{display:flex; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--line); font-size:14px;}
   .hist-row:last-child{border-bottom:none;}
 
-  /* forms / modal */
-  .modal-bg{position:fixed; inset:0; background:rgba(0,0,0,.4); display:flex; align-items:flex-end; justify-content:center; z-index:50;}
-  .modal{background:var(--card); border-radius:22px 22px 0 0; padding:20px; width:100%; max-width:520px;}
+  /* forms / modal — centered so it never hides behind the phone's URL bar / keyboard */
+  .modal-bg{position:fixed; inset:0; background:rgba(0,0,0,.4); display:flex; align-items:center; justify-content:center; z-index:50; padding:16px;}
+  .modal{background:var(--card); border-radius:22px; padding:20px; width:100%; max-width:520px; max-height:85vh; overflow-y:auto; -webkit-overflow-scrolling:touch;}
   input,select{width:100%; padding:12px; border-radius:12px; border:1px solid var(--line); background:var(--bg); color:var(--ink); font-size:16px; margin-bottom:12px;}
   .emoji-pick{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px;}
   .emoji-pick button{font-size:24px; width:44px; height:44px; border-radius:12px; border:1px solid var(--line); background:var(--bg); cursor:pointer;}
