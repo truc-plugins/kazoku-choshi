@@ -223,44 +223,84 @@ function uid(){ return Math.random().toString(36).slice(2,9); }
 const METRICS = [
   {k:"tapCount", label:"タップ数",   dir:+1, dim:"body"},
   {k:"tapCV",    label:"リズムの安定",dir:-1, dim:"mind"}, // lower CV = steadier
-  {k:"rtMedian", label:"反応の速さ", dir:-1, dim:"body"}, // lower ms = faster
+  // rtInv = 1000/RT の平均。PVT で睡眠不足・疲労にもっとも敏感とされる指標。
+  // rtMedian も記録するが採点には使わない（同じものを二重に数えないため）
+  {k:"rtInv",    label:"処理の速さ", dir:+1, dim:"body"},
   {k:"rtSD",     label:"反応の安定", dir:-1, dim:"mind"},
   {k:"rtLapses", label:"見落とし",   dir:-1, dim:"mind"},
 ];
 
 function mean(a){ return a.reduce((x,y)=>x+y,0)/a.length; }
 function std(a){ if(a.length<2) return 0; const m=mean(a); return Math.sqrt(mean(a.map(x=>(x-m)**2))); }
+function median(a){
+  if(!a.length) return 0;
+  const s=a.slice().sort((x,y)=>x-y), h=Math.floor(s.length/2);
+  return s.length%2 ? s[h] : (s[h-1]+s[h])/2;
+}
+// median absolute deviation → 標準偏差に換算（1日だけの大きな外れ値に引きずられない）
+function mad(a){
+  if(a.length<2) return 0;
+  const m=median(a);
+  return median(a.map(x=>Math.abs(x-m))) * 1.4826;
+}
+
+const BASE_MIN_DAYS = 4;    // 平常値に必要な最低日数
+const BASE_WINDOW   = 21;   // 参照する直近日数
+// 反応テストの試行数。5回では「ばらつき」の推定が不安定で精度の足かせになるため
+// 10回に増やし、そのぶん待ち時間を短くして所要時間を抑えている
+const RT_TRIALS     = 10;
 
 // baseline from prior records (exclude the record itself)
 function baselineFor(recs, metricKey, excludeDate){
-  const vals = recs.filter(r=>r.date!==excludeDate && r[metricKey]!=null).map(r=>r[metricKey]).slice(-14);
-  if(vals.length<3) return null;
-  return {m:mean(vals), s:std(vals) || 1};
+  const vals = recs.filter(r=>r.date!==excludeDate && r[metricKey]!=null)
+                   .map(r=>r[metricKey]).slice(-BASE_WINDOW);
+  if(vals.length<BASE_MIN_DAYS) return null;
+  const m = median(vals);
+  // ばらつきの下限を設ける。履歴が数日しかないと MAD が偶然ゼロ近くになり、
+  // わずかな差が z=±3 に跳ねてしまうため。
+  const floor = Math.abs(m)*0.06;
+  const s = Math.max(mad(vals), floor, 1e-6);
+  return {m, s, n:vals.length};
 }
 
 // composite z of a record given the person's history
 function scoreRecord(recs, rec){
-  let zs=[], dims={body:[], mind:[]};
+  let zs=[], dims={body:[], mind:[]}, nDays=0;
   for(const met of METRICS){
     if(rec[met.k]==null) continue;
     const b = baselineFor(recs, met.k, rec.date);
     if(!b) continue;
-    let z = (rec[met.k]-b.m)/(b.s||1);
+    nDays = Math.max(nDays, b.n);
+    let z = (rec[met.k]-b.m)/b.s;
     z = z*met.dir; // orient so + = better
     z = Math.max(-3, Math.min(3, z));
     zs.push(z); dims[met.dim].push(z);
   }
   if(zs.length===0) return {ready:false};
-  const comp = mean(zs);
+  // 普段と3時間以上ずれた時刻の測定は、時間帯の影響が混ざるため参考値として扱う
+  const hrs = recs.filter(r=>r.date!==rec.date && r.hour!=null).map(r=>r.hour);
+  const offHour = (rec.hour!=null && hrs.length>=BASE_MIN_DAYS)
+    ? Math.abs(rec.hour-median(hrs))>=3 : false;
+  const body = dims.body.length? mean(dims.body):null;
+  const mind = dims.mind.length? mean(dims.mind):null;
+  // 体2指標・心3指標なので単純平均だと心に偏る。次元ごとに均して合成する
+  const parts = [body, mind].filter(v=>v!=null);
+  const comp = mean(parts);
   return {
     ready:true,
     z: comp,
-    display: Math.round(Math.max(0,Math.min(100, 50 + comp*18))),
-    body: dims.body.length? mean(dims.body):null,
-    mind: dims.mind.length? mean(dims.mind):null,
+    display: zToScore(comp),
+    body, mind,
+    nDays, offHour,
+    conf: nDays>=10 ? "high" : nDays>=7 ? "mid" : "low",
   };
 }
 
+// z を 0〜100 の表示スコアへ。両端で滑らかに飽和させ、
+// 「0点」「100点」に張り付いて不安を煽ったり伸びしろが消えたりしないようにする
+function zToScore(z){
+  return Math.round(50 + 45*Math.tanh(z/2.2));
+}
 function signalFromZ(z){
   if(z>=-0.5) return "g";
   if(z>=-1.5) return "y";
@@ -300,14 +340,16 @@ function statusFor(pid){
   const s = scoreRecord(recs, latest);
   const t = trendFor(pid);
   if(!s.ready){
-    const need = 3 - priorCount(recs, latest.date);
+    const need = BASE_MIN_DAYS - priorCount(recs, latest.date);
     return {state:"learning", msg:`平常値を学習中（あと${Math.max(1,need)}回）`, latest, spark:t.spark, arrow:t.arrow};
   }
   const sig = signalFromZ(s.z);
   let msg = signalLabel(sig);
   if(t.arrow==="↘") msg += "・下降ぎみ";
   else if(t.arrow==="↗") msg += "・回復傾向";
-  return {state:"ok", sig, msg, score:s.display, z:s.z, body:s.body, mind:s.mind, latest, spark:t.spark, arrow:t.arrow};
+  return {state:"ok", sig, msg, score:s.display, z:s.z, body:s.body, mind:s.mind,
+          conf:s.conf, nDays:s.nDays, offHour:s.offHour,
+          latest, spark:t.spark, arrow:t.arrow};
 }
 
 /* ---------- sparkline ---------- */
@@ -495,8 +537,8 @@ function initTapStep(){
 function rtStepHTML(){
   return `<div class="measure-wrap">
     <div class="big-instr">② 緑になったら すぐタップ</div>
-    <div class="sub-instr">赤の間は待つ。フライングはやり直しです。全5回。</div>
-    <div class="rt-trials" id="rtTrials">${[0,1,2,3,4].map(()=>'<div class="t"></div>').join("")}</div>
+    <div class="sub-instr">赤の間は待つ。フライングはやり直しです。全${RT_TRIALS}回。</div>
+    <div class="rt-trials" id="rtTrials">${Array.from({length:RT_TRIALS},()=>'<div class="t"></div>').join("")}</div>
     <div class="rt-area rt-ready" id="rtArea">タップして スタート</div>
     <div id="rtNext"></div>
   </div>`;
@@ -504,7 +546,7 @@ function rtStepHTML(){
 function initRtStep(){
   const area=document.getElementById("rtArea");
   const trialsEl=document.getElementById("rtTrials");
-  const N=5; let results=[]; let phase="ready"; let goT=0; let timer=null; let lastEvt=0;
+  const N=RT_TRIALS; let results=[]; let phase="ready"; let goT=0; let timer=null; let lastEvt=0;
   function setTrials(){
     [...trialsEl.children].forEach((el,i)=>{
       el.className="t"+(results[i]!=null?(results[i].bad?" bad":" done"):"");
@@ -513,7 +555,7 @@ function initRtStep(){
   function nextTrial(){
     if(results.length>=N){ finish(); return; }
     phase="wait"; area.className="rt-area rt-wait"; area.textContent="待って…";
-    const delay=1200+Math.random()*2600;
+    const delay=1000+Math.random()*2000;
     timer=setTimeout(()=>{ phase="go"; goT=performance.now(); area.className="rt-area rt-go"; area.textContent="今！タップ"; }, delay);
   }
   function onTap(e){
@@ -536,14 +578,20 @@ function initRtStep(){
   }
   function finish(){
     phase="done"; area.style.pointerEvents="none";
-    const valid=results.filter(r=>!r.bad).map(r=>r.rt);
-    const sorted=valid.slice().sort((a,b)=>a-b);
-    const median = sorted.length? sorted[Math.floor(sorted.length/2)] : 600;
+    const responded=results.filter(r=>!r.bad).map(r=>r.rt);
+    // 100ms未満は人間の反応として速すぎる（当て推量）。標準的なPVTと同様に
+    // 有効試行から外し、見落としと同じ扱いにする。0除算の防止にもなる
+    const valid=responded.filter(r=>r>=100);
+    const antic=responded.length-valid.length;
+    const med = valid.length? Math.round(median(valid)) : 600;
     const sd = valid.length>1? Math.round(std(valid)) : 0;
-    const lapses = valid.filter(r=>r>500).length + results.filter(r=>r.bad).length;
-    M.rt={ rtMedian:median, rtSD:sd, rtLapses:lapses };
+    const lapses = valid.filter(r=>r>500).length + results.filter(r=>r.bad).length + antic;
+    // 逆数RT（1000/RT の平均）。極端に遅い1回に振り回されにくく、
+    // 疲労・睡眠不足の検出感度が中央値より高いとされる
+    const inv = valid.length? +mean(valid.map(r=>1000/r)).toFixed(3) : 0;
+    M.rt={ rtMedian:med, rtSD:sd, rtLapses:lapses, rtInv:inv };
     area.className="rt-area rt-result";
-    area.innerHTML=`中央値 ${median}ms`;
+    area.innerHTML=`中央値 ${med}ms`;
     // same reason as the tap step: keep the button out of the tap target
     document.getElementById("rtNext").innerHTML =
       `<button class="btn" onclick="finishMeasure()">結果を見る →</button>`;
@@ -552,8 +600,12 @@ function initRtStep(){
 }
 
 function finishMeasure(){
-  // save record
-  const rec = { date:todayStr(), ts:Date.now(), ...M.tap, ...M.rt };
+  // save record（hour は「普段と違う時刻の測定」を見分けるために残す。
+  // 反応速度は時間帯で大きく動くので、体調の変化と混ざらないようにする）
+  const now = new Date();
+  const rec = { date:todayStr(), ts:Date.now(),
+                hour:+(now.getHours()+now.getMinutes()/60).toFixed(2),
+                ...M.tap, ...M.rt };
   if(!db.records[M.pid]) db.records[M.pid]=[];
   // replace same-day record if exists
   db.records[M.pid] = db.records[M.pid].filter(r=>r.date!==rec.date);
@@ -571,7 +623,7 @@ function resultHTML(){
   const p = db.profiles.find(x=>x.id===M.pid);
   let top;
   if(!s.ready){
-    const need = 3 - priorCount(recs, rec.date);
+    const need = BASE_MIN_DAYS - priorCount(recs, rec.date);
     top = `<div class="card" style="text-align:center">
       <div style="font-size:40px">📊</div>
       <div class="big-instr">記録しました</div>
@@ -588,6 +640,7 @@ function resultHTML(){
         <div style="flex:1"><div style="font-size:12px;color:var(--sub)">体のキレ</div>${dimBar(s.body)}</div>
         <div style="flex:1"><div style="font-size:12px;color:var(--sub)">心の余裕</div>${dimBar(s.mind)}</div>
       </div>
+      ${confNoteHTML(s)}
     </div>`;
   }
   const raw = `<div class="card">
@@ -597,13 +650,27 @@ function resultHTML(){
     <div class="metric-row"><span>反応の速さ（中央値）</span><span class="val">${rec.rtMedian} ms</span></div>
     <div class="metric-row"><span>反応のばらつき</span><span class="val">${rec.rtSD} ms</span></div>
     <div class="metric-row"><span>見落とし</span><span class="val">${rec.rtLapses} 回</span></div>
+    ${rec.hour!=null?`<div class="metric-row"><span>測定時刻</span><span class="val">${fmtHour(rec.hour)}</span></div>`:""}
   </div>`;
   return top+raw+`<button class="btn" onclick="M=null;go('home')">ホームに戻る</button>
     <button class="btn secondary" style="margin-top:10px" onclick="go('detail',{pid:'${M.pid}'})">${escapeHtml(p.name)}の推移を見る</button>`;
 }
+function fmtHour(h){
+  const hh=Math.floor(h), mm=Math.round((h-hh)*60);
+  return `${hh}:${String(mm).padStart(2,"0")}`;
+}
+// 判定の確かさ（学習日数）と、時間帯ズレの注意書き
+function confNoteHTML(s){
+  const notes=[];
+  if(s.offHour) notes.push("⏰ 普段と違う時刻の測定なので参考値です");
+  if(s.conf==="low")      notes.push(`学習${s.nDays}日ぶん・精度はまだ粗めです`);
+  else if(s.conf==="mid") notes.push(`学習${s.nDays}日ぶん・精度は中くらいです`);
+  if(!notes.length) return "";
+  return `<div style="font-size:11px;color:var(--sub);margin-top:12px;line-height:1.5">${notes.join("<br>")}</div>`;
+}
 function dimBar(z){
   if(z==null) return `<div class="bar"><span style="width:0"></span></div><div style="font-size:11px;color:var(--sub)">学習中</div>`;
-  const pct=Math.max(4,Math.min(100, 50+z*18));
+  const pct=Math.max(4, zToScore(z));
   const col = z>=-0.5?"var(--green)":z>=-1.5?"var(--yellow)":"var(--red)";
   return `<div class="bar"><span style="width:${pct}%;background:${col}"></span></div>`;
 }
@@ -632,7 +699,8 @@ function renderDetail(pid){
       <div style="display:flex;gap:14px;margin-top:14px">
         <div style="flex:1"><div style="font-size:12px;color:var(--sub)">体のキレ</div>${dimBar(st.body)}</div>
         <div style="flex:1"><div style="font-size:12px;color:var(--sub)">心の余裕</div>${dimBar(st.mind)}</div>
-      </div></div>`;
+      </div>
+      ${confNoteHTML(st)}</div>`;
   }
 
   // line chart of display scores
@@ -832,7 +900,9 @@ function seedDemo(){
       const rtMedian=Math.round(240 + (1-health)*160 + (Math.random()-0.5)*20);
       const rtSD=Math.round(25 + (1-health)*60 + Math.random()*10);
       const rtLapses=Math.max(0, Math.round((1-health)*3 + (Math.random()-0.6)));
-      db.records[id].push({date,ts:dt.getTime(),tapCount,tapCV,tapMeanInterval:Math.round(10000/tapCount),rtMedian,rtSD,rtLapses});
+      const rtInv=+(1000/rtMedian*(1-0.05*(1-health))).toFixed(3);
+      const hour=+(7.5+(Math.random()-0.5)).toFixed(2); // 毎朝7時台に測っている想定
+      db.records[id].push({date,ts:dt.getTime(),hour,tapCount,tapCV,tapMeanInterval:Math.round(10000/tapCount),rtMedian,rtSD,rtLapses,rtInv});
     }
   });
   save(); Sync.replaceAll(); closeModal(); go('home');
