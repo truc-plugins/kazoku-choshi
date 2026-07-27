@@ -556,6 +556,24 @@ function stillStepHTML(){
   </div>`;
 }
 function motionSupported(){ return typeof DeviceMotionEvent!=="undefined"; }
+function retryStill(){ if(M){ M.step=0; renderMeasure(); } }
+// センサーが使えなかったときの案内。iOS は設定でモーションを許可する必要があり、
+// Chrome など一部のブラウザでは許可要求そのものが通らないことがある
+function sensorHelpHTML(note){
+  const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||
+    (navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
+  const ua=navigator.userAgent;
+  const isSafari=/Safari/.test(ua)&&!/CriOS|FxiOS|EdgiOS|OPiOS/.test(ua);
+  let tips=[];
+  if(isIOS){
+    tips.push("設定 → Safari →「モーションと画面の向きへのアクセス」をオンにしてください");
+    if(!isSafari) tips.push("<b>Safariで開くと動くことがあります</b>（他のブラウザでは許可が通らない場合があります）");
+  }else{
+    tips.push("パソコンなど動きセンサーの無い端末では測れません");
+  }
+  tips.push("この項目を飛ばしても、ほかの指標だけで判定できます");
+  return tips.map(t=>"・"+t).join("<br>") + (note?`<br><span style="opacity:.6">（${note}）</span>`:"");
+}
 
 function initStillStep(){
   const area=document.getElementById("stillArea");
@@ -563,20 +581,24 @@ function initStillStep(){
   const barEl=document.getElementById("stillBar");
   const timerEl=document.getElementById("stillTimer");
   const DUR=10000;
-  let started=false, done=false, lastEvt=0;
+  let started=false, done=false, lastEvt=0, permNote=null;
   // 軸ごとに保持する。合成の大きさだけを見ると、重力と直交する方向の震え
   // （手の震えの主成分）が重力に埋もれて消えてしまうため
   let acc={x:[],y:[],z:[]}, gyr={x:[],y:[],z:[]}, t0=0, displayTimer=null, finishTimer=null;
   const accLen=()=>acc.x.length;
 
-  function skip(msg){
-    done=true;
+  function skip(msg, detail){
+    done=true; started=false;
     area.style.pointerEvents="none";
-    mainEl.innerHTML=`<div style="font-size:15px;font-weight:600;padding:0 14px">${msg}</div>`;
+    area.classList.add("pre");   // 計測中のオレンジを戻し、案内文を読みやすくする
+    mainEl.innerHTML=`<div style="font-size:15px;font-weight:600;padding:0 14px">${msg}</div>`
+      + (detail?`<div style="font-size:11px;font-weight:400;opacity:.7;margin-top:10px;padding:0 14px">${detail}</div>`:"");
     barEl.style.display="none"; timerEl.textContent="";
     M.still={};   // 指標なしで先へ。scoreRecord は欠けた指標を自動で無視する
+    // 設定を変えてから再挑戦できるように、やり直しも用意する
     document.getElementById("stillNext").innerHTML =
-      `<button class="btn" onclick="goToTapStep()">次へ（タップ）→</button>`;
+      `<button class="btn" onclick="goToTapStep()">このまま次へ（タップ）→</button>
+       <button class="btn secondary" style="margin-top:10px" onclick="retryStill()">もう一度ためす</button>`;
   }
   function onMotion(e){
     const a=e.accelerationIncludingGravity;
@@ -604,10 +626,10 @@ function initStillStep(){
       barEl.firstElementChild.style.width=pct.toFixed(0)+"%";
       barEl.firstElementChild.style.background = pct<40?"var(--green)":pct<75?"var(--yellow)":"var(--red)";
     }
-    if(!accLen() && performance.now()-t0>2500){ // センサーが動いていない
+    if(!accLen() && performance.now()-t0>2500){ // センサーの値が届かない
       clearInterval(displayTimer); clearTimeout(finishTimer);
       window.removeEventListener("devicemotion", onMotion);
-      skip("この端末では手の震えを測れませんでした。<br>この項目はスキップします。");
+      skip("動きを検知できませんでした。", sensorHelpHTML(permNote));
     }
   }
   function finish(){
@@ -615,7 +637,7 @@ function initStillStep(){
     clearInterval(displayTimer); clearTimeout(finishTimer);
     window.removeEventListener("devicemotion", onMotion);
     area.style.pointerEvents="none";
-    if(accLen()<20){ skip("うまく測れませんでした。<br>この項目はスキップします。"); return; }
+    if(accLen()<20){ skip("うまく測れませんでした。", sensorHelpHTML(permNote)); return; }
     const secs=(performance.now()-t0)/1000;
     const rate=accLen()/secs;
     const tremor=+tremorRMS(acc, rate).toFixed(4);                        // m/s²
@@ -632,19 +654,33 @@ function initStillStep(){
     const now=performance.now();
     if(now-lastEvt<200) return; lastEvt=now;
     if(started||done) return;
-    if(!motionSupported()){ skip("この端末には動きセンサーがありません。<br>この項目はスキップします。"); return; }
-    // iOS は利用者の操作から許可を求める必要がある
+    if(!motionSupported()){ skip("この端末には動きセンサーがありません。"); return; }
+    mainEl.innerHTML=`<div style="font-size:16px;font-weight:600">準備中…</div>`;
+    // iOS は利用者の操作から許可を求める必要がある。ただし許可要求が拒否や
+    // エラーになっても、実際にはイベントが届く環境があるため、
+    // 結果にかかわらず一度は計測を試し「本当に値が来たか」で判断する
     if(typeof DeviceMotionEvent.requestPermission==="function"){
-      mainEl.innerHTML=`<div style="font-size:16px;font-weight:600">許可を確認中…</div>`;
-      DeviceMotionEvent.requestPermission().then(res=>{
-        if(res==="granted") begin();
-        else skip("動きセンサーの利用が許可されませんでした。<br>この項目はスキップします。");
-      }).catch(()=>skip("動きセンサーを使えませんでした。<br>この項目はスキップします。"));
+      let settled=false;
+      const go=(why)=>{ if(settled) return; settled=true; permNote=why; begin(); };
+      try{
+        const pr=DeviceMotionEvent.requestPermission();
+        if(pr && typeof pr.then==="function"){
+          pr.then(res=>go(res==="granted"?null:"許可の状態: "+res))
+            .catch(err=>go("許可要求のエラー: "+((err&&(err.name||err.message))||"unknown")));
+          setTimeout(()=>go("許可要求の応答がありませんでした"), 4000); // 応答が来ない端末対策
+          return;
+        }
+        go(null);
+      }catch(err){
+        go("許可要求の例外: "+((err&&(err.name||err.message))||"unknown"));
+      }
       return;
     }
     begin();
   }
-  area.addEventListener("pointerdown", onTap);
+  // 許可要求は click（明確なユーザー操作）から呼ぶ必要がある。
+  // pointerdown だと iOS で弾かれることがある
+  area.addEventListener("click", onTap);
 }
 // 移動平均を引いて低周波（姿勢の傾き・ゆっくりした動き）を除き、震え成分だけ残す
 function highPass(vals, rate){
