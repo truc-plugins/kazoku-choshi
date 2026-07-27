@@ -228,6 +228,9 @@ const METRICS = [
   {k:"rtInv",    label:"処理の速さ", dir:+1, dim:"body"},
   {k:"rtSD",     label:"反応の安定", dir:-1, dim:"mind"},
   {k:"rtLapses", label:"見落とし",   dir:-1, dim:"mind"},
+  // 手の震え。緊張・自律神経の高ぶり・疲労で大きくなり、意識では抑えられない。
+  // センサーが無い端末では欠けるが、その場合は自動的に採点から外れる
+  {k:"stillTremor", label:"手の静けさ", dir:-1, dim:"mind"},
 ];
 
 function mean(a){ return a.reduce((x,y)=>x+y,0)/a.length; }
@@ -458,25 +461,28 @@ function renderPickMeasure(){
 /* ---------- MEASURE flow ---------- */
 let M = null;
 function startMeasure(pid){
-  M = {pid, step:0, tap:null, rt:null};
+  M = {pid, step:0, still:null, tap:null, rt:null};
   go('measure');
 }
 function renderMeasure(){
   if(!M){ go('home'); return; }
   const p = db.profiles.find(x=>x.id===M.pid);
-  const dots = `<div class="step-dots">${[0,1,2].map(i=>`<div class="d ${i<=M.step?'on':''}"></div>`).join("")}</div>`;
+  const dots = `<div class="step-dots">${[0,1,2,3].map(i=>`<div class="d ${i<=M.step?'on':''}"></div>`).join("")}</div>`;
   const head = `<header class="top"><button class="iconbtn" onclick="cancelMeasure()">✕</button><h1>${escapeHtml(p.name)}の測定</h1><span class="date"></span></header>`;
-  if(M.step===0){ app.innerHTML = head+dots+tapStepHTML(); initTapStep(); }
-  else if(M.step===1){ app.innerHTML = head+dots+rtStepHTML(); initRtStep(); }
+  // 静止 → タップ → 反応 の順。連打の直後は手が震えるため静止を先に測る
+  if(M.step===0){ app.innerHTML = head+dots+stillStepHTML(); initStillStep(); }
+  else if(M.step===1){ app.innerHTML = head+dots+tapStepHTML(); initTapStep(); }
+  else if(M.step===2){ app.innerHTML = head+dots+rtStepHTML(); initRtStep(); }
   else { app.innerHTML = head+dots+resultHTML(); }
 }
 function cancelMeasure(){ M=null; go('home'); }
-function goToRtStep(){ if(M){ M.step=1; renderMeasure(); } }
+function goToTapStep(){ if(M){ M.step=1; renderMeasure(); } }
+function goToRtStep(){ if(M){ M.step=2; renderMeasure(); } }
 
-/* --- Step 1: tap rhythm --- */
+/* --- Step 2: tap rhythm --- */
 function tapStepHTML(){
   return `<div class="measure-wrap">
-    <div class="big-instr">① いつもと同じリズムで10秒間タップ</div>
+    <div class="big-instr">② いつもと同じリズムで10秒間タップ</div>
     <div class="sub-instr">速すぎず、無理せず。“いつもの自分”の感覚で。</div>
     <div class="tap-area pre" id="tapArea">
       <div class="tap-count" id="tapCount">タップして<br>スタート</div>
@@ -533,10 +539,139 @@ function initTapStep(){
   area.addEventListener("pointerdown", onTap);
 }
 
-/* --- Step 2: reaction time (PVT) --- */
+/* --- Step 1: stillness (physiological tremor) ---
+   生理的な微細な震えは意識で抑えられないため、「調子が良いふり」ができない。
+   画面にゆれを出して全力で止めてもらうことで、上限（＝実力）を測る形にしている。
+   センサーが無い/許可されない端末では、この指標だけ欠けたまま先へ進める。 */
+function stillStepHTML(){
+  return `<div class="measure-wrap">
+    <div class="big-instr">① スマホを持って10秒じっと</div>
+    <div class="sub-instr">腕を前に軽く伸ばし、できるだけ動かさないように。<br>手のわずかな震えを測ります（意識では抑えられません）。</div>
+    <div class="tap-area pre" id="stillArea">
+      <div class="tap-count" id="stillMain" style="font-size:34px;line-height:1.3">タップして<br>スタート</div>
+      <div class="bar" id="stillBar" style="width:70%;margin-top:18px;display:none"><span style="width:0"></span></div>
+      <div class="tap-timer" id="stillTimer"></div>
+    </div>
+    <div id="stillNext"></div>
+  </div>`;
+}
+function motionSupported(){ return typeof DeviceMotionEvent!=="undefined"; }
+
+function initStillStep(){
+  const area=document.getElementById("stillArea");
+  const mainEl=document.getElementById("stillMain");
+  const barEl=document.getElementById("stillBar");
+  const timerEl=document.getElementById("stillTimer");
+  const DUR=10000;
+  let started=false, done=false, lastEvt=0;
+  // 軸ごとに保持する。合成の大きさだけを見ると、重力と直交する方向の震え
+  // （手の震えの主成分）が重力に埋もれて消えてしまうため
+  let acc={x:[],y:[],z:[]}, gyr={x:[],y:[],z:[]}, t0=0, displayTimer=null, finishTimer=null;
+  const accLen=()=>acc.x.length;
+
+  function skip(msg){
+    done=true;
+    area.style.pointerEvents="none";
+    mainEl.innerHTML=`<div style="font-size:15px;font-weight:600;padding:0 14px">${msg}</div>`;
+    barEl.style.display="none"; timerEl.textContent="";
+    M.still={};   // 指標なしで先へ。scoreRecord は欠けた指標を自動で無視する
+    document.getElementById("stillNext").innerHTML =
+      `<button class="btn" onclick="goToTapStep()">次へ（タップ）→</button>`;
+  }
+  function onMotion(e){
+    const a=e.accelerationIncludingGravity;
+    if(a && a.x!=null){ acc.x.push(a.x); acc.y.push(a.y); acc.z.push(a.z); }
+    const r=e.rotationRate;
+    if(r && r.alpha!=null){ gyr.x.push(r.alpha); gyr.y.push(r.beta); gyr.z.push(r.gamma); }
+  }
+  function begin(){
+    started=true; t0=performance.now();
+    area.classList.remove("pre");
+    mainEl.innerHTML=`<div style="font-size:20px;font-weight:700">動かさないで</div>`;
+    barEl.style.display="block";
+    window.addEventListener("devicemotion", onMotion);
+    // requestAnimationFrame は画面が消えると止まるため使わない（タップ計測と同じ理由）
+    displayTimer=setInterval(tick,100);
+    finishTimer=setTimeout(finish,DUR);
+  }
+  function tick(){
+    const left=Math.max(0,(t0+DUR-performance.now())/1000);
+    timerEl.textContent="残り "+left.toFixed(1)+"秒";
+    // 直近0.5秒ぶんのゆれをバーで見せる（全力で止めてもらうため）
+    if(accLen()>6){
+      const rms=tremorRMS({x:acc.x.slice(-30),y:acc.y.slice(-30),z:acc.z.slice(-30)}, 60);
+      const pct=Math.min(100, rms/0.35*100);
+      barEl.firstElementChild.style.width=pct.toFixed(0)+"%";
+      barEl.firstElementChild.style.background = pct<40?"var(--green)":pct<75?"var(--yellow)":"var(--red)";
+    }
+    if(!accLen() && performance.now()-t0>2500){ // センサーが動いていない
+      clearInterval(displayTimer); clearTimeout(finishTimer);
+      window.removeEventListener("devicemotion", onMotion);
+      skip("この端末では手の震えを測れませんでした。<br>この項目はスキップします。");
+    }
+  }
+  function finish(){
+    if(done) return; done=true;
+    clearInterval(displayTimer); clearTimeout(finishTimer);
+    window.removeEventListener("devicemotion", onMotion);
+    area.style.pointerEvents="none";
+    if(accLen()<20){ skip("うまく測れませんでした。<br>この項目はスキップします。"); return; }
+    const secs=(performance.now()-t0)/1000;
+    const rate=accLen()/secs;
+    const tremor=+tremorRMS(acc, rate).toFixed(4);                        // m/s²
+    const gyro = gyr.x.length>=20 ? +tremorRMS(gyr, rate).toFixed(3) : null;  // deg/s
+    M.still={ stillTremor:tremor };
+    if(gyro!=null) M.still.stillGyro=gyro;
+    barEl.style.display="none"; timerEl.textContent="計測できました";
+    mainEl.innerHTML=`${mg(tremor)}<div style="font-size:16px;font-weight:600">mg のゆれ</div>`;
+    document.getElementById("stillNext").innerHTML =
+      `<button class="btn" onclick="goToTapStep()">次へ（タップ）→</button>`;
+  }
+  function onTap(e){
+    e.preventDefault();
+    const now=performance.now();
+    if(now-lastEvt<200) return; lastEvt=now;
+    if(started||done) return;
+    if(!motionSupported()){ skip("この端末には動きセンサーがありません。<br>この項目はスキップします。"); return; }
+    // iOS は利用者の操作から許可を求める必要がある
+    if(typeof DeviceMotionEvent.requestPermission==="function"){
+      mainEl.innerHTML=`<div style="font-size:16px;font-weight:600">許可を確認中…</div>`;
+      DeviceMotionEvent.requestPermission().then(res=>{
+        if(res==="granted") begin();
+        else skip("動きセンサーの利用が許可されませんでした。<br>この項目はスキップします。");
+      }).catch(()=>skip("動きセンサーを使えませんでした。<br>この項目はスキップします。"));
+      return;
+    }
+    begin();
+  }
+  area.addEventListener("pointerdown", onTap);
+}
+// 移動平均を引いて低周波（姿勢の傾き・ゆっくりした動き）を除き、震え成分だけ残す
+function highPass(vals, rate){
+  const w=Math.max(3, Math.round(rate*0.3));
+  const out=[];
+  for(let i=0;i<vals.length;i++){
+    const a=Math.max(0,i-Math.floor(w/2)), b=Math.min(vals.length, i+Math.ceil(w/2));
+    let s=0; for(let j=a;j<b;j++) s+=vals[j];
+    out.push(vals[i]-s/(b-a));
+  }
+  return out;
+}
+// 3軸それぞれを高域通過してから合成する。こうしないと、重力と直交する方向の
+// 震え（手の震えの主成分）が重力の大きさに埋もれて検出できない
+function tremorRMS(axes, rate){
+  const hx=highPass(axes.x, rate), hy=highPass(axes.y, rate), hz=highPass(axes.z, rate);
+  const n=Math.min(hx.length,hy.length,hz.length);
+  if(!n) return 0;
+  let s=0; for(let i=0;i<n;i++) s+=hx[i]**2+hy[i]**2+hz[i]**2;
+  return Math.sqrt(s/n);
+}
+function mg(accel){ return Math.round(accel/9.80665*1000); } // m/s² → mg（ミリG）
+
+/* --- Step 3: reaction time (PVT) --- */
 function rtStepHTML(){
   return `<div class="measure-wrap">
-    <div class="big-instr">② 緑になったら すぐタップ</div>
+    <div class="big-instr">③ 緑になったら すぐタップ</div>
     <div class="sub-instr">赤の間は待つ。フライングはやり直しです。全${RT_TRIALS}回。</div>
     <div class="rt-trials" id="rtTrials">${Array.from({length:RT_TRIALS},()=>'<div class="t"></div>').join("")}</div>
     <div class="rt-area rt-ready" id="rtArea">タップして スタート</div>
@@ -605,14 +740,14 @@ function finishMeasure(){
   const now = new Date();
   const rec = { date:todayStr(), ts:Date.now(),
                 hour:+(now.getHours()+now.getMinutes()/60).toFixed(2),
-                ...M.tap, ...M.rt };
+                ...M.still, ...M.tap, ...M.rt };
   if(!db.records[M.pid]) db.records[M.pid]=[];
   // replace same-day record if exists
   db.records[M.pid] = db.records[M.pid].filter(r=>r.date!==rec.date);
   db.records[M.pid].push(rec);
   db.records[M.pid].sort((a,b)=>a.date<b.date?-1:1);
   save(); Sync.pushRecord(M.pid, rec);
-  M.step=2; renderMeasure();
+  M.step=3; renderMeasure();   // 静止・タップ・反応の次が結果画面
 }
 
 /* --- result --- */
@@ -645,6 +780,7 @@ function resultHTML(){
   }
   const raw = `<div class="card">
     <div class="sectlabel" style="margin-top:0">今日の記録</div>
+    ${rec.stillTremor!=null?`<div class="metric-row"><span>手の震え</span><span class="val">${mg(rec.stillTremor)} mg</span></div>`:""}
     <div class="metric-row"><span>タップ数（10秒）</span><span class="val">${rec.tapCount} 回</span></div>
     <div class="metric-row"><span>リズムのばらつき</span><span class="val">${(rec.tapCV*100).toFixed(1)} %</span></div>
     <div class="metric-row"><span>反応の速さ（中央値）</span><span class="val">${rec.rtMedian} ms</span></div>
@@ -902,7 +1038,9 @@ function seedDemo(){
       const rtLapses=Math.max(0, Math.round((1-health)*3 + (Math.random()-0.6)));
       const rtInv=+(1000/rtMedian*(1-0.05*(1-health))).toFixed(3);
       const hour=+(7.5+(Math.random()-0.5)).toFixed(2); // 毎朝7時台に測っている想定
-      db.records[id].push({date,ts:dt.getTime(),hour,tapCount,tapCV,tapMeanInterval:Math.round(10000/tapCount),rtMedian,rtSD,rtLapses,rtInv});
+      // 調子が悪い日は手の震えが大きくなる（0.05〜0.20 m/s² ≒ 5〜20mg）
+      const stillTremor=+(0.05+(1-health)*0.12+Math.random()*0.02).toFixed(4);
+      db.records[id].push({date,ts:dt.getTime(),hour,stillTremor,tapCount,tapCV,tapMeanInterval:Math.round(10000/tapCount),rtMedian,rtSD,rtLapses,rtInv});
     }
   });
   save(); Sync.replaceAll(); closeModal(); go('home');
