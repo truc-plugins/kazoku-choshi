@@ -544,9 +544,27 @@ function initTapStep(){
    画面にゆれを出して全力で止めてもらうことで、上限（＝実力）を測る形にしている。
    センサーが無い/許可されない端末では、この指標だけ欠けたまま先へ進める。 */
 function stillStepHTML(){
+  const bad=iosNoMotion();
+  if(bad){
+    // 測れないことが確定している環境。試させる前に案内して先へ通す
+    return `<div class="measure-wrap">
+      <div class="big-instr">① 手の震え</div>
+      <div class="card" style="text-align:left;margin-top:14px">
+        <div style="font-weight:700;margin-bottom:8px">${bad}では手の震えを測れません</div>
+        <div style="font-size:13px;color:var(--sub);line-height:1.7">
+          iPhoneでは<b>Safari</b>だけが動きセンサーを使えます（Appleの制約のため、
+          ほかのブラウザでは対応できません）。<br>
+          Safariで開くと測れるようになります。
+        </div>
+        <button class="btn secondary" style="margin-top:14px" onclick="copyAppUrl()">リンクをコピー</button>
+      </div>
+      <p class="note">この項目を飛ばしても、ほかの4指標で判定できます。</p>
+      <button class="btn" onclick="skipStill()">次へ（タップ）→</button>
+    </div>`;
+  }
   return `<div class="measure-wrap">
     <div class="big-instr">① スマホを持って10秒じっと</div>
-    <div class="sub-instr"><b>片手</b>で持ち、ひじは浮かせて腕を前へ。動かさないように。<br><b>毎回おなじ手・おなじ姿勢</b>で測ってください。<br><span style="opacity:.8">手のわずかな震えを測ります（意識では抑えられません）。</span></div>
+    <div class="sub-instr"><b>利き手で片手持ち</b>、ひじは浮かせて腕を前へ。<br><b>毎回おなじ手・おなじ姿勢</b>で測ってください。<br><span style="opacity:.8">手のわずかな震えを測ります（意識では抑えられません）。</span></div>
     <div class="tap-area pre" id="stillArea">
       <div class="tap-count" id="stillMain" style="font-size:34px;line-height:1.3">タップして<br>スタート</div>
       <div class="bar" id="stillBar" style="width:70%;margin-top:18px;display:none"><span style="width:0"></span></div>
@@ -557,6 +575,31 @@ function stillStepHTML(){
 }
 function motionSupported(){ return typeof DeviceMotionEvent!=="undefined"; }
 function retryStill(){ if(M){ M.step=0; renderMeasure(); } }
+// iOS で動きセンサーの許可を得られるのは Safari のみ。Chrome や
+// LINE などアプリ内ブラウザでは Apple の制約で原理的に測れないので、
+// 10秒待たせる前に伝える
+function iosNoMotion(){
+  const ua=navigator.userAgent;
+  const isIOS=/iPad|iPhone|iPod/.test(ua)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
+  if(!isIOS) return null;
+  if(/Line\//i.test(ua)) return "LINE内のブラウザ";
+  if(/FBAN|FBAV|Instagram/i.test(ua)) return "アプリ内のブラウザ";
+  if(/CriOS/i.test(ua)) return "Chrome";
+  if(/FxiOS/i.test(ua)) return "Firefox";
+  if(/EdgiOS/i.test(ua)) return "Edge";
+  if(/OPiOS|OPT\//i.test(ua)) return "Opera";
+  // Safari でも許可APIが無い（アプリ内ブラウザの多くが該当）
+  if(typeof DeviceMotionEvent==="undefined"||typeof DeviceMotionEvent.requestPermission!=="function")
+    return "このブラウザ";
+  return null;
+}
+function copyAppUrl(){
+  const url=location.origin+location.pathname;
+  navigator.clipboard?.writeText(url).then(
+    ()=>alert("リンクをコピーしました。\nSafariを開いて貼り付けてください。"),
+    ()=>alert("コピーできませんでした。\nアドレスバーのURLを手でコピーしてください。")
+  );
+}
 // センサーが使えなかったときの案内。iOS は設定でモーションを許可する必要があり、
 // Chrome など一部のブラウザでは許可要求そのものが通らないことがある
 function sensorHelpHTML(note){
@@ -575,8 +618,12 @@ function sensorHelpHTML(note){
   return tips.map(t=>"・"+t).join("<br>") + (note?`<br><span style="opacity:.6">（${note}）</span>`:"");
 }
 
+function skipStill(){ if(M){ M.still={}; goToTapStep(); } }
+
 function initStillStep(){
   const area=document.getElementById("stillArea");
+  if(!area) return;   // 測れない環境の案内を出しているとき
+
   const mainEl=document.getElementById("stillMain");
   const barEl=document.getElementById("stillBar");
   const timerEl=document.getElementById("stillTimer");
